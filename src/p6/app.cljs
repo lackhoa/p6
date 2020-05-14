@@ -207,7 +207,6 @@
                                       (cond rec?  "Recording..."
                                             :else "Rec")]))}
                      l))))
-
     true))
 
 (def the-frame (-> (u/dmat) (.scale w h)))

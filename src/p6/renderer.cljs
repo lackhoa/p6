@@ -12,15 +12,19 @@
 
 ;; beta-reduce-rendert can definitely be a conft
 ;; λ Syntax: The identity function is (λ [x] x)
+(defn anon?
+  "Check if a variable/parameter is meant to be rendered anonymously"
+  [exp] (= (-> exp :name str first) \_))
+
 (defn parse
   "Parse hand-written λ-expression
-    Types of expressions: var, global, param, abs(traction), app(lication)
-    `env` maps parameters to gen-symbols
-    (parse '((λ [x] x) a)) ➾
-    {:type :app
-     :rator {:type :abs, :params ({:name x, :sym G__315})
-             :body {:type :var, :name x, :ref G__315}}
-     :rands ({:type :global, :name a})}"
+   Types of expressions: var, global, param, abs(traction), app(lication)
+   `env` maps parameters to gen-symbols
+   (parse '((λ [x] x) a)) ➾
+   {:type :app
+    :rator {:type :abs, :params ({:name x, :sym G__315})
+            :body {:type :var, :name x, :ref G__315}}
+    :rands ({:type :global, :name a})}"
   ([exp] (parse exp {}))
   ([exp env]
    (cond (symbol? exp)
@@ -130,11 +134,14 @@
     (def om-brown (u/hsl 359, 50, 22)))
 
   (def lam-pad 0.9)
+  (def var-style {:stroke om-yellow :fill u/transparent})
   (defn lam-var-shapes [name]
-    [(u/text name {:stroke om-yellow :fill u/transparent})])
+    [(u/text name var-style)])
+  (def lam-anon-shapes
+    [(u/circ 0.5 0.5 0.1 var-style)])
   (def lam-param-shapes lam-var-shapes)
-  (defn lam-global-shapes [name]
-    [(u/text name {:stroke om-white :fill om-white})]))
+  (defn lam-global-shapes [sym]
+    [(u/text sym {:stroke om-white :fill om-white})]))
 
 (defn lam-conf
   "Configuration of the λ-expression at path `path` under `exp`,
@@ -145,8 +152,10 @@
    (case (:type exp)
      :global {path {:frame frame
                     :shapes (lam-global-shapes (:name exp))}}
-     :var {path {:frame frame
-                 :shapes (lam-var-shapes (:name exp))}}
+     :var {path (if (anon? exp) {:frame (u/force-square frame)
+                                 :shapes lam-anon-shapes}
+                    {:frame frame
+                     :shapes (lam-var-shapes (:name exp))})}
 
      :abs (let [{:keys [params body]} exp]
             (let [division 0.2  ;; param / (the whole frame)
@@ -170,8 +179,11 @@
                           {:frame (-> params-frame
                                       (.scale scale 1)
                                       (.translate i 0)
-                                      (u/pad-frame lam-pad))
-                           :shapes (lam-param-shapes (:name param))}})))))
+                                      (u/pad-frame lam-pad)
+                                      (#(if (anon? param) (u/force-square %)
+                                            %)))
+                           :shapes (if (anon? param) lam-anon-shapes
+                                       (lam-param-shapes (:name param)))}})))))
 
      :app (let [{:keys [rator rands]} exp]
             (let [division 0.5  ;; How much is rator, compared to the whole frame
@@ -353,7 +365,7 @@
                  (cond exp+ (concat [exp] (beta-reductions exp+ (dec limit)))
                        :else [])))))
 
-(let [exp (parse '(((λ [f a] (a f)) (λ [x] x) (λ [x] x))
+(let [exp (parse '(((λ [_f _a] (_a _f)) (λ [_x] _x) (λ [_x] _x))
                    z))
       reds (beta-reductions exp)
       rts (for [e reds]
