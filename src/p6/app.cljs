@@ -211,7 +211,7 @@
     true))
 
 (def the-frame (-> (u/dmat) (.scale w h)))
-(def the-square-frame (u/square-frame the-frame))
+(def square-frame (u/force-square the-frame))
 (do  ;; Zooming & Panning
   (reset! params
           ;; view-frame is initially "the-frame"
@@ -247,130 +247,6 @@
                                  "o" #(zoom (* w -0.25))
                                  "m" teleport
                                  "0" #(set-param "view-frame" the-frame)})))
-
-(do  ;; Primitive Painters
-  (defn text-ratio
-    "Get width:height ratio of the text (assuming it scales uniformly)"
-    [text]
-    (u/lift-ctx
-     ctx
-     (fn [] (set! (.-font ctx) (str "Normal 1px Arial")))
-     (fn [] (let [m (.measureText ctx text)]
-              (.-width m)))))
-
-  (defn painter
-    "Paint a shape"
-    [{:keys [path text fill stroke line-width]}]
-    {:pre [(or path text)]}
-    (fn [frame]
-      (cond path  ;; Draw path
-            (do (u/lift-ctx
-                 ctx
-                 (fn [] (.setTransform ctx frame))
-                 (fn []
-                   (.beginPath ctx)
-                   (doseq [[op a0 a1 a2 a3 a4 a5] path]
-                     (case op
-                       :move-to    (.moveTo ctx a0 a1)
-                       :line-to    (.lineTo ctx a0 a1)
-                       :arc        (.arc ctx a0 a1 a2 a3 a4 a5)
-                       :close-path (.closePath ctx)))))
-                ;; Stroke outside of transformation
-                (u/lift-ctx
-                 ctx
-                 (fn []
-                   (set! (.-fillStyle ctx)   (u/css fill))
-                   (set! (.-strokeStyle ctx) (u/css stroke))
-                   (set! (.-lineWidth ctx) line-width))
-                 (fn [] (.stroke ctx) (.fill ctx))))
-
-            text   ;; Draw text that fits nicely into the frame (no stretching)
-            (let [frame (-> frame (u/force-ratio (text-ratio text)))]
-              (u/lift-ctx
-               ctx
-               (fn []
-                 ;; We draw at [0 0], so the text is below that
-                 (set! (.-textBaseline ctx) "top")
-                 ;; (font height) = (frame height)
-                 (set! (.-font ctx)
-                       (str "Normal " (u/frame-height frame) "px" " Arial"))
-                 (set! (.-fillStyle ctx)   (u/css fill))
-                 (set! (.-strokeStyle ctx) (u/css stroke))
-                 (set! (.-lineWidth ctx) line-width))
-               (fn []
-                 (let [[x y] (u/transform frame [0 0])]
-                   (.fillText   ctx text x y)
-                   (.strokeText ctx text x y))))))))
-
-  (defn textp [& args]
-    (painter (apply u/text args)))
-
-  (defn linep [& args]
-    (painter (apply u/line args)))
-
-  (defn circp [& args]
-    (painter (apply u/circ args)))
-
-  (defn rectp [& args]
-    (painter (apply u/rect args)))
-
-  (defn dot
-    "Painter of a rectangle that resembles a dot.
-    Note: This is a non-relative painter."
-    ([x y] (dot x y {}))
-    ([x y style]
-     (fn [frame]
-       (let [[X Y] (u/transform frame [x y])]
-         (u/lift-ctx
-          ctx
-          (fn [] (set! (.-fill ctx) (u/css style)))
-          #(.fillRect ctx X Y 3 3))))))
-
-  (defn label
-    "Painter of a label"
-    ([txt x y] (label txt x y nil))
-    ([txt x y color]
-     (fn [frame]
-       (let [[X Y] (u/transform frame [x y])
-             metrics     (.measureText ctx txt)
-             text-width  (.-width metrics)
-             text-height (- (.-actualBoundingBoxAscent  metrics)
-                            (.-actualBoundingBoxDescent metrics))
-             ;; Constrain the text so it does not go out of bound
-             [Xc,Yc] [(min X (- w text-width))
-                      (max Y text-height)]]
-         (u/lift-ctx
-          ctx
-          (fn []
-            ;; view it as a stroke
-            (set! (.-fillStyle ctx) (u/css (or color u/default-stroke)))
-            ;; cast a black aura around it
-            (set! (.-strokeStyle ctx) (u/css (u/hsl 0 0 0))))
-          #(.fillText ctx txt Xc Yc))))))
-
-  (defn draw-grid
-    "Painter of a grid, in a given unit frame"
-    ([arg] (draw-grid arg {}))
-    ([{:keys [xmin ymin xmax ymax]}
-      {:keys [step style]
-       :or {step 1 style (u/hsl 0 0 50)}}]
-     (fn [frame]
-       (doseq [x (concat (range xmin xmax step) [xmax])]
-         ((label x x 0) frame)
-         ((painter (u/line [x ymin] [x ymax] {:stroke style}))
-          frame))
-       (doseq [y (concat (range ymin ymax step) [ymax])]
-         ((label y 0 y) frame)
-         ((painter (u/line [xmin y] [xmax y] {:stroke style}))
-          frame))))))
-
-(defn render-conf
-  "Just draw all the objects in `conf`
-   Note: objects and their identities don't matter in rendering."
-  [conf]
-  (doseq [{:keys [shapes frame]} (vals conf)]
-    (doseq [shape shapes]
-      ((painter shape) frame))))
 
 (defn render [] (reset! params @params))
 

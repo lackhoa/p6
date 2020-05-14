@@ -225,16 +225,16 @@
    (doseq [[var-path param-path] refs]
      (let [var-frame (:frame (conf var-path))
            param-frame (:frame (conf param-path))]
-       (a/render-conf
-        {(gensym)
-         {:frame (u/dmat)  ;; This is absolute, not relative to a frame
-          :shapes [(u/line (u/transform var-frame [0.5 0.5])
-                           (u/transform param-frame [0.5 0.5])
-                           style)]}})))))
+       (u/paint a/ctx
+                (u/line (u/transform var-frame [0.5 0.5])
+                        (u/transform param-frame [0.5 0.5])
+                        style)
+                (;; The lines are absolute, not relative to a frame
+                 u/dmat))))))
 
 (defn render-lam [exp frame]
   (let [conf (lam-conf exp frame)]
-    (a/render-conf conf)
+    (u/render-conf a/ctx conf)
     (render-refs conf (lam-refs exp))))
 
 (defn beta-reduce-rendert
@@ -319,7 +319,7 @@
                  u/morph-conf ec conf1)]
          (fn [t]
            (let [t (tween t), c (ct t)]
-             (a/render-conf c)
+             (u/render-conf a/ctx c)
              (render-refs c erefs))))
        1]
       [;; Phase 2
@@ -333,14 +333,14 @@
            (;; Render the guidelines (not time-dependent)
             render-refs ec, guides, {:stroke u/red :line-width 2})
            (let [t (tween t), c (ct t)]
-             (a/render-conf c)
+             (u/render-conf a/ctx c)
              (render-refs c erefs+))))
        1]
       [;; Phase 3
        (let [ct (u/morph-conf conf3 ec+)]
          (fn [t]
            (let [t (tween t), c (ct t)]
-             (a/render-conf c)
+             (u/render-conf a/ctx c)
              (render-refs c erefs+))))
        0.5]))))
 
@@ -357,7 +357,7 @@
                    z))
       reds (beta-reductions exp)
       rts (for [e reds]
-            (beta-reduce-rendert e a/the-frame {:tween u/quad-out}))]
+            (beta-reduce-rendert e a/square-frame {:tween u/quad-out}))]
   (a/set-draw!
    (fn [params]
      (u/fill-background a/ctx om-brown)

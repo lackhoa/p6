@@ -159,7 +159,7 @@
                         (/ (- 1 hs) 2))
             (.scale ws hs)))))
 
-  (defn square-frame
+  (defn force-square
     "Force a frame to be square"
     [frame]
     (force-ratio frame 1))
@@ -266,7 +266,7 @@
           (fn? x)      :fn
           (number? x)  :num
           (coll? x)    :col
-          (dmat? x)  :dmat))
+          (dmat? x)    :dmat))
   (defmulti  add (fn [x y] (map arith-dispatch [x y])))
   (defmethod add [:num :num] [x y] (+ x y))
   (defmethod add [:col :col] [x y] (map add x y))
@@ -320,50 +320,7 @@
           :else   (let [d (subtract b a)]
                     #(case %  ;; arg is Time
                        0 a 1 b
-                       (add a (mult % d))))))
-
-  #_(defmethod morph [:polygon :polygon] [p1 p2]
-      (let [[vs1 vs2] (map :vertices [p1 p2])
-            [vs1 vs2]
-            (let [cmax (max (count vs1) (count vs2))
-                  f    (fn [vs]
-                         (let [c (count vs)]
-                           (cond (< c cmax)
-                                 (let [q (quot cmax c), r (mod cmax c)]
-                                   (mapcat
-                                    (fn [v i]
-                                      (cond (< i r) (repeat (inc q) v)
-                                            :else   (repeat q v)))
-                                    vs (range 0 c)))
-                                 :else vs)))]
-              [(f vs1) (f vs2)])]
-        (fn [t]  ;; Returns a polygon
-          (let [vs (map (fn [[x1 y1] [x2 y2]]
-                          [((from-01 x1 x2) t)
-                           ((from-01 y1 y2) t)])
-                        vs1 vs2)
-                stroke ((morph (p1 :stroke) (p2 :stroke)) t)
-                fill   ((morph (p1 :fill)   (p2 :fill))   t)]
-            {:type     :polygon
-             :vertices vs
-             :stroke   stroke
-             :fill     fill}))))
-
-  #_(letfn [(approx-circle [c]
-              (-> (repoly 15)
-                  (polygon :fill (c :fill) :stroke (c :stroke))))]
-      (defmethod morph [:polygon :circle] [p c]
-        (let [m (morph p (approx-circle c))]
-          (fn [t]
-            (case t
-              0 p, 1 c, (m t))))))
-
-  #_(defmethod morph [:circle :polygon] [c p] (rev-anime (morph p c)))
-  #_(defmethod morph [:circle :circle] [c c+]
-      (fn [t]
-        (let [stroke ((morph (c :stroke) (c+ :stroke)) t)
-              fill   ((morph (c :fill)   (c+ :fill))   t)]
-          {:type :circle :stroke stroke :fill fill}))))
+                       (add a (mult % d)))))))
 
 (do ;; Layout & Configuration
   ;; Configuration: a map of objects, indexed by ids
@@ -412,10 +369,12 @@
   (defn morph-shapes
     "`ss1` fades out, and `ss2` fades in"
     [ss1 ss2]
-    (cond (= ss1 ss2) (fn [t] ss1)
-          :else (let [ms (concat (for [s ss1] (morph s (fade s)))
-                                 (for [s ss2] (morph (fade s) s)))]
-                  (fn [t] (for [m ms] (m t))))))
+    (cond
+      ;; This check can be lethal for alike-objects!
+      (= ss1 ss2) (fn [t] ss1)
+      :else (let [ms (concat (for [s ss1] (morph s (fade s)))
+                             (for [s ss2] (morph (fade s) s)))]
+              (fn [t] (for [m ms] (m t))))))
 
   (defn morph-obj [o1 o2]
     (let [mf (morph        (o1 :frame)  (o2 :frame))
@@ -444,8 +403,11 @@
                     (into {})))))))
 
 (do ;; Things to do with the context
+  (defn ctx-width [ctx] (-> ctx .-canvas .-width))
+  (defn ctx-height [ctx] (-> ctx .-canvas .-height))
+
   (defn lift-ctx
-    "Safely u/transform the context according to `setup` to perform the function `body`"
+    "Safely transform the context according to `setup` to perform the function `body`"
     [ctx setup body]
     (.save ctx) (setup) (let [out (body)] (.restore ctx) out))
 
@@ -453,6 +415,133 @@
     (lift-ctx
      ctx
      (fn [] (set! (.-fillStyle ctx) (css color)))
-     (fn [] (.fillRect ctx 0 0
-                       (-> ctx .-canvas .-width)
-                       (-> ctx .-canvas .-height))))))
+     (fn [] (.fillRect ctx 0 0 (ctx-width ctx) (ctx-height ctx)))))
+
+  (do  ;; Primitive Painters
+    (defn text-ratio
+      "Get width:height ratio of the text (assuming it scales uniformly)"
+      [ctx text]
+      (lift-ctx
+       ctx
+       (fn [] (set! (.-font ctx) (str "Normal 1px Arial")))
+       (fn [] (let [m (.measureText ctx text)]
+                (.-width m)))))
+
+    (defn painter
+      "Paint a shape"
+      ;; I can do work before receiving the frame
+      [ctx {:keys [path text fill stroke line-width]}]
+      {:pre [(or path text)]}
+      (cond path  ;; Draw path
+            (fn [frame]
+              (lift-ctx ctx
+                        (fn [] (.setTransform ctx frame))
+                        (fn []
+                          (.beginPath ctx)
+                          (doseq [[op a0 a1 a2 a3 a4 a5] path]
+                            (case op
+                              :move-to    (.moveTo ctx a0 a1)
+                              :line-to    (.lineTo ctx a0 a1)
+                              :arc        (.arc ctx a0 a1 a2 a3 a4 a5)
+                              :close-path (.closePath ctx)))))
+              ;; Stroke outside of transformation
+              (lift-ctx ctx
+                        (fn []
+                          (set! (.-fillStyle ctx)   (css fill))
+                          (set! (.-strokeStyle ctx) (css stroke))
+                          (set! (.-lineWidth ctx) line-width))
+                        (fn [] (.stroke ctx) (.fill ctx))))
+
+            text   ;; Draw text that fits nicely into the frame (no stretching)
+            (fn [frame]
+              (let [frame (-> frame (force-ratio (text-ratio ctx text)))]
+                (lift-ctx
+                 ctx
+                 (fn []
+                   ;; We draw at [0 0], so the text is below that
+                   (set! (.-textBaseline ctx) "top")
+                   ;; (font height) = (frame height)
+                   (set! (.-font ctx)
+                         (str "Normal " (frame-height frame) "px" " Arial"))
+                   (set! (.-fillStyle ctx)   (css fill))
+                   (set! (.-strokeStyle ctx) (css stroke))
+                   (set! (.-lineWidth ctx) line-width))
+                 (fn []
+                   (let [[x y] (transform frame [0 0])]
+                     (.fillText   ctx text x y)
+                     (.strokeText ctx text x y))))))))
+
+    (defn paint [ctx shape frame] ((painter ctx shape) frame))
+
+    (defn textp [ctx & args]
+      (painter ctx (apply text args)))
+
+    (defn linep [ctx & args]
+      (painter ctx (apply line args)))
+
+    (defn circp [ctx & args]
+      (painter ctx (apply circ args)))
+
+    (defn rectp [ctx & args]
+      (painter ctx (apply rect args)))
+
+    (defn dot
+      "Painter of a rectangle that resembles a dot.
+    Note: This is a non-relative painter."
+      ([ctx x y] (dot ctx x y {}))
+      ([ctx x y style]
+       (fn [frame]
+         (let [[X Y] (transform frame [x y])]
+           (lift-ctx
+            ctx
+            (fn [] (set! (.-fill ctx) (css style)))
+            (fn [] (.fillRect ctx X Y 3 3)))))))
+
+    (defn label
+      "Painter of a label"
+      ([ctx txt x y] (label txt x y nil))
+      ([ctx txt x y color]
+       (fn [frame]
+         (let [[X Y] (transform frame [x y])
+               metrics     (.measureText ctx txt)
+               text-width  (.-width metrics)
+               text-height (- (.-actualBoundingBoxAscent  metrics)
+                              (.-actualBoundingBoxDescent metrics))
+               ;; Constrain the text so it does not go out of bound
+               [Xc,Yc] [(min X (- (ctx-width ctx) text-width))
+                        (max Y text-height)]]
+           (lift-ctx
+            ctx
+            (fn []
+              ;; view it as a stroke
+              (set! (.-fillStyle ctx) (css (or color default-stroke)))
+              ;; cast a black aura around it
+              (set! (.-strokeStyle ctx) (css (hsl 0 0 0))))
+            (fn [] (.fillText ctx txt Xc Yc)))))))
+
+    (defn draw-grid
+      "Painter of a grid, in a given unit frame"
+      ([ctx arg] (draw-grid arg {}))
+      ([ctx
+        {:keys [xmin ymin xmax ymax]}
+        {:keys [step style]
+         :or {step 1 style (hsl 0 0 50)}}]
+       (fn [frame]
+         (doseq [x (concat (range xmin xmax step) [xmax])]
+           ((label ctx x x 0) frame)
+           (paint ctx
+                  (line [x ymin] [x ymax] {:stroke style})
+                  frame))
+         (doseq [y (concat (range ymin ymax step) [ymax])]
+           ((label ctx y 0 y) frame)
+           (paint ctx
+                  (line [xmin y] [xmax y] {:stroke style})
+                  frame))))))
+
+  (defn render-conf
+    "Just draw all the objects in `conf`
+   Note: objects and their identities don't matter in rendering."
+    [ctx conf]
+    (doseq [{:keys [shapes frame]} (vals conf)]
+      (doseq [shape shapes]
+        (paint ctx shape frame)))))
