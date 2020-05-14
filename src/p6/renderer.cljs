@@ -10,7 +10,7 @@
   (:require-macros
    [cljs.core.async.macros :refer [go-loop go]]))
 
-;; beta-reduce-rendert can definitely be a conft
+;; reduce-rendert can definitely be a conft
 ;; λ Syntax: The identity function is (λ [x] x)
 (defn anon?
   "Check if a variable/parameter is meant to be rendered anonymously"
@@ -28,9 +28,9 @@
   ([exp] (parse exp {}))
   ([exp env]
    (cond (symbol? exp)
-         (let [lu (env exp)]
-           (cond lu {:type :var, :name exp, :ref lu}
-                 :else {:type :global, :name exp}))
+         (if-let [lu (env exp)]
+           {:type :var, :name exp, :ref lu}
+           {:type :global, :name exp})
 
          (= (first exp) 'λ)
          (let [[_λ params body] exp]
@@ -52,13 +52,13 @@
             :rator (parse rator env)
             :rands (for [rand rands] (parse rand env))}))))
 
-(defn lam-ref [exp path]
+(defn ref-lam [exp path]
   (cond (empty? path) exp
         :else (let [[a & d] path
                     ;; The path is written exactly based on component's name
                     exp+ (exp a)]
                 (assert exp+ (str "Path does not exist " path))
-                (lam-ref exp+ d))))
+                (ref-lam exp+ d))))
 
 (defn copy-lam
   "Freshen all internal parameters in `exp`, used in substitution
@@ -83,7 +83,7 @@
               (update :rands #(for [rand %]
                                 (copy-lam rand env)))))))
 
-(defn subst-lam
+(defn subst
   "`env` is the map of symbols → expressions to be substituted"
   [exp env]
   (case (:type exp)
@@ -92,35 +92,38 @@
            ;; Copy the expression before substituting
            (cond lu (copy-lam lu)
                  :else exp))
-    :abs (update exp :body #(subst-lam % env))
+    :abs (update exp :body #(subst % env))
     :app (-> exp
-             (update :rator #(subst-lam % env))
+             (update :rator #(subst % env))
              (update :rands (fn [rands]
-                              (map #(subst-lam % env) rands))))))
+                              (map #(subst % env) rands))))))
 
-(defn beta-reduce
+(defn reduce-lam
   "(λ [x] x) ➾ (λ [x] x)
-     (((λ [x] (x x)) (λ [x] (x x))) ➾ itself)
-     Returns both `exp` and the `path` of the reduction (if happened)
-     If no reduction is possible, returns `nil`"
-  ([exp] (beta-reduce exp []))
+  (((λ [x] (x x)) (λ [x] (x x))) ➾ itself)
+  Returns both `exp` and the `path` of the reduction (if happened)
+  If no reduction is possible, returns `nil`.
+  We try to be liberal: the worst result is `nil` not error."
+  ([exp] (reduce-lam exp []))
   ([exp path]
    (case (:type exp)
      (:global :var :abs) nil
      :app (let [{:keys [rator rands]} exp]
             (case (:type rator)
-              (:global :var) nil
+              :var (throw (str "How can a variable ever be an operator?" rator))
+              ;; Global operator: some primitive stuff needs to happen
+              :global nil
               ;; Abstraction: this is the direct application case
               :abs (let [{:keys [params body]} rator
                          env (->> (for [[param arg]
                                         (map vector params rands)]
                                     [(:sym param) arg])
                                   (into {}))]
-                     {:exp (subst-lam body env)
+                     {:exp (subst body env)
                       :path path})
               ;; Application: might be reducible, let's see...
               :app (let [{rator+ :exp, path+ :path}
-                         (beta-reduce rator (concat path [:rator]))]
+                         (reduce-lam rator (concat path [:rator]))]
                      (cond rator+ {:exp (assoc exp :rator rator+)
                                    :path path+}
                            :else nil)))))))
@@ -141,39 +144,45 @@
     [(u/circ 0.5 0.5 0.1 var-style)])
   (def lam-param-shapes lam-var-shapes)
   (defn lam-global-shapes [sym]
-    [(u/text sym {:stroke om-white :fill om-white})]))
+    [(u/text sym {:stroke om-white :fill om-white})])
+  (def lam-ref-shapes
+    [(u/line [0 0] [1 1] {:stroke om-yellow})]))
 
 (defn lam-conf
-  "Configuration of the λ-expression at path `path` under `exp`,
-    physically positioned relative to `frame`
-    Note: References are not (and cannot be) included"
+  "Configuration of `exp`, with ids relative to `path`
+  physically positioned relative to `frame`
+  `env` maps binding references to parameters' frames"
   ([exp frame] (lam-conf exp frame {}))
-  ([exp frame {:keys [path] :or {path []}}]
+  ([exp frame {:keys [path env] :or {path [], env {}}}]
    (case (:type exp)
      :global {path {:frame frame
                     :shapes (lam-global-shapes (:name exp))}}
      :var {path (if (anon? exp) {:frame (u/force-square frame)
                                  :shapes lam-anon-shapes}
                     {:frame frame
-                     :shapes (lam-var-shapes (:name exp))})}
+                     :shapes (lam-var-shapes (:name exp))})
+           ;; The reference of the variable
+           [:ref path] {:frame
+                        (let [[src-x src-y] (u/transform frame [0.5 0.5])
+                              [tar-x tar-y] (u/transform (env (:ref exp))
+                                                         [0.5 0.5])]
+                          (-> (u/dmat)
+                              (.translate src-x src-y)
+                              (.scale (- tar-x src-x) (- tar-y src-y))))
+                        ;; Shape: a line from [0 0] to [1 1]
+                        :shapes lam-ref-shapes}}
 
-     :abs (let [{:keys [params body]} exp]
-            (let [division 0.2  ;; param / (the whole frame)
-                  params-frame (.scale frame 1 division)
-                  body-frame (-> (.translate frame 0 division)
-                                 (.scale 1 (- 1 division))
-                                 (u/pad-frame lam-pad))]
-              (apply merge
-                     {path {:frame frame
-                            :shapes [(u/line [0 division] [1 division]
-                                             {:stroke om-white
-                                              :line-width 5})]}}
-                     (;; Config of the body
-                      lam-conf body body-frame {:path (concat path [:body])})
-
-                     (let [scale (cond (= 0 (count params)) nil
-                                       :else (/ 1 (count params)))]
-                       (for  ;; Config of the parameters
+     :abs (let [{:keys [params body]} exp
+                division 0.2  ;; param / (the whole frame)
+                params-frame (.scale frame 1 division)
+                body-frame (-> (.translate frame 0 division)
+                               (.scale 1 (- 1 division))
+                               (u/pad-frame lam-pad))
+                params-conf
+                (->> (let  ;; Config of parameters (to which we refer in the body)
+                         [scale (cond (= 0 (count params)) nil
+                                      :else (/ 1 (count params)))]
+                       (for
                            [[param i] (u/enumerate params)]
                          {(concat path [:params i])
                           {:frame (-> params-frame
@@ -183,34 +192,54 @@
                                       (#(if (anon? param) (u/force-square %)
                                             %)))
                            :shapes (if (anon? param) lam-anon-shapes
-                                       (lam-param-shapes (:name param)))}})))))
+                                       (lam-param-shapes (:name param)))}}))
+                     (apply merge))]
+            (merge
+             {;; The outline
+              path {:frame frame
+                    :shapes [(u/line [0 division] [1 division]
+                                     {:stroke om-white, :line-width 5})]}}
+             (;; Config of the body
+              lam-conf body, body-frame
+              {:env (merge env
+                           (->> (for [[param i] (u/enumerate params)]
+                                  [(:sym param) (-> (concat path [:params i])
+                                                    params-conf
+                                                    :frame)])
+                                (into {})))
+               :path (concat path [:body])})
 
-     :app (let [{:keys [rator rands]} exp]
-            (let [division 0.5  ;; How much is rator, compared to the whole frame
-                  rator-path (concat path [:rator])
-                  rator-frame (-> frame
-                                  (.scale division 1)
-                                  (u/pad-frame lam-pad))
-                  rands-path (concat path [:rands])
-                  rands-frame (-> frame
-                                  (.translate division 0)
-                                  (.scale (- 1 division) 1)
-                                  (u/pad-frame lam-pad))]
-              (apply merge
-                     {path {:frame frame
-                            :shapes [(u/line [division 0] [division 1]
-                                             {:stroke om-white, :line-width 5})]}}
-                     (lam-conf rator, rator-frame, {:path rator-path})
-                     (let [scale (/ 1 (count rands))]
-                       (for  ;; Drawing the rands
-                           [[rand i] (map vector rands (range))]
-                         (let [rand-path (concat rands-path [i])
-                               rand-frame (-> rands-frame
-                                              (.scale 1 scale)
-                                              (.translate 0 i)
-                                              (u/pad-frame lam-pad))]
-                           (lam-conf rand, rand-frame
-                                     {:path rand-path}))))))))))
+             params-conf))
+
+     :app (let [{:keys [rator rands]} exp
+                division 0.5  ;; How much is rator, compared to the whole frame
+                rator-path (concat path [:rator])
+                rator-frame (-> frame
+                                (.scale division 1)
+                                (u/pad-frame lam-pad))
+                rands-path (concat path [:rands])
+                rands-frame (-> frame
+                                (.translate division 0)
+                                (.scale (- 1 division) 1)
+                                (u/pad-frame lam-pad))]
+            (apply merge
+                   {;; The outline
+                    path {:frame frame
+                          :shapes [(u/line [division 0] [division 1]
+                                           {:stroke om-white, :line-width 5})]}}
+                   (;; Config of the rator
+                    lam-conf rator, rator-frame, {:path rator-path, :env env})
+                   (let  ;; Configs of the rands
+                       [scale (/ 1 (count rands))]
+                     (for
+                         [[rand i] (map vector rands (range))]
+                       (let [rand-path (concat rands-path [i])
+                             rand-frame (-> rands-frame
+                                            (.scale 1 scale)
+                                            (.translate 0 i)
+                                            (u/pad-frame lam-pad))]
+                         (lam-conf rand, rand-frame
+                                   {:path rand-path, :env env})))))))))
 
 (defn lam-refs
   "Returns a mapping of var-paths to param-paths in `exp`"
@@ -249,18 +278,18 @@
     (u/render-conf a/ctx conf)
     (render-refs conf (lam-refs exp))))
 
-(defn beta-reduce-rendert
+(defn reduce-rendert
   "time → rendering of the beta reduction of `exp`
-    `tween` is gonna be applied to all phases"
-  ([exp frame] (beta-reduce-rendert exp frame {}))
+  `tween` is gonna be applied to all phases"
+  ([exp frame] (reduce-rendert exp frame {}))
   ([exp frame {tween :tween :or {tween identity}}]
    (let [ec (lam-conf exp frame)
          erefs (lam-refs exp)
-         {exp+ :exp path :path} (beta-reduce exp)
+         {exp+ :exp path :path} (reduce-lam exp)
          erefs+ (lam-refs exp+)
          ec+ (lam-conf exp+ frame)
 
-         rands (lam-ref exp (concat path [:rands]))
+         rands (ref-lam exp (concat path [:rands]))
          ;; Map each var under rator-body to its param path
          usage (->> (lam-refs exp)
                     (filter (fn [[k v]]
@@ -296,7 +325,7 @@
          conf3 ec+
          conf3 (merge
                 conf3
-                (lam-conf (lam-ref exp+ path)
+                (lam-conf (ref-lam exp+ path)
                           (:frame (ec (concat path [:rator :body])))
                           {:path path}))
 
@@ -361,23 +390,25 @@
   ([exp] (beta-reductions exp 10))
   ([exp limit]
    (cond (= limit 0) []
-         :else (let [{exp+ :exp} (beta-reduce exp)]
+         :else (let [{exp+ :exp} (reduce-lam exp)]
                  (cond exp+ (concat [exp] (beta-reductions exp+ (dec limit)))
                        :else [])))))
 
+#_
 (let [exp (parse '(((λ [_f _a] (_a _f)) (λ [_x] _x) (λ [_x] _x))
                    z))
       reds (beta-reductions exp)
       rts (for [e reds]
-            (beta-reduce-rendert e a/square-frame {:tween u/quad-out}))]
+            (reduce-rendert e a/square-frame {:tween u/quad-out}))]
   (a/set-draw!
    (fn [params]
      (u/fill-background a/ctx om-brown)
      ((apply u/series (for [rt rts] [rt 1]))
       (params "t")))))
 
-;; Try resizing the lambda parts if needed
+;; I need type hint for path
 ;; Make a "capture" button
+;; Try resizing the lambda parts
 ;; Implement frame movement techniques (as in introduction & delay)
 ;; implement intro/outro frames (in the morph function)
 ;; Draw directly from vertices, to not lose structure of polygons
