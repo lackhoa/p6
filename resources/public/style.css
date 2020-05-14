@@ -1,0 +1,6 @@
+html, body {
+    /* We want the canvas to take up the entire screen*/
+    margin:  0; padding: 0;
+    background-color: black;
+    color: white;
+}

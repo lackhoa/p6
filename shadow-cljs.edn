@@ -1,0 +1,13 @@
+;; shadow-cljs configuration
+{:source-paths ["src"]
+
+ :dependencies [[reagent "0.10.0"]]
+
+ :builds {:main {:target :node-script  ;; Just a script
+                 :output-to "resources/main.js"
+                 :main p6.main/main}
+
+          :renderer {:target :browser
+                     :output-dir "resources/public/js"
+                     :asset-path "js"  ;; the server's root is "resources/public"
+                     :modules {:renderer {:entries [p6.renderer]}}}}}

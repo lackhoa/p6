@@ -1,0 +1,29 @@
+{
+    "name": "p6",
+    "version": "1.0.0",
+    "description": "graphics system",
+    "main": "resources/main.js",
+    "scripts": {
+        "dev": "./node_modules/.bin/shadow-cljs watch main renderer",
+        "build": "./node_modules/.bin/shadow-cljs compile main renderer",
+        "clean": "rm -rf resources/public/js/* && rm -rf resources/main.js"
+    },
+    "keywords": [
+        "shadow-cljs",
+        "reagent",
+        "electron"
+    ],
+    "author": "Khoa Vo <vodangkhoa873@gmail.com>",
+    "license": "ISC",
+    "devDependencies": {
+        "electron": "^3.1.13",
+        "shadow-cljs": "^2.8.94"
+    },
+    "dependencies": {
+        "create-react-class": "^15.6.3",
+        "electron-prompt": "^1.5.1",
+        "react": "^16.10.2",
+        "react-dom": "^16.10.2",
+        "scheduler": "^0.19.1"
+    }
+}
