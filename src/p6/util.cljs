@@ -67,13 +67,13 @@
   ([h s l a] {:h h :s s :l l :a a}))
 (def transparent (hsl 0 0 0 0))
 (def red    (hsl 0 100 50))
-(def green  (assoc red :h 33))
-(def blue   (assoc red :h 66))
+(def green  (assoc red :h 120))
+(def blue   (assoc red :h 240))
 (def white  (assoc red :l 1))
 (def grey   (assoc red :s 0 :l 50))
 (def gray   grey)
 (def black  (assoc red :l 0))
-(def yellow (assoc red :h 16))
+(def yellow (assoc red :h 60))
 
 ;; These are defined to initialize color data
 (def default-stroke (hsl 0 100 50))
@@ -383,24 +383,22 @@
 
   (defn morph-conf
     "Morph two configurations (`c2` is allowed to be a function)"
-    ([c1 c2] (morph-conf c1 c2 identity))
-    ([c1 c2 mapping]
-     (let [m (->> (for [id (keys c1)]
-                    (let [id+ (mapping id)]
-                      (cond
-                        ;; We can guard against null, but not all cases
-                        (not id+)
-                        (throw (str "target does not exist for id " id))
+    [c1 c2]
+    (let [m (->> (for [id (keys c1)]
+                   (cond
+                     ;; We can guard against null, but not all cases
+                     (not id)
+                     (throw (str "target does not exist for id " id))
 
-                        (not (c2 id+))
-                        (throw (str "target id " id+ " does not exist"))
+                     (not (c2 id))
+                     (throw (str "target id " id " does not exist"))
 
-                        :else
-                        [id (morph-obj (c1 id) (c2 id+))])))
-                  (into {}))]
-       ;; Now `m` contains morphs, we feed them time to get back objects
-       (fn [t] (->> (for [[k v] m] [k (v t)])
-                    (into {})))))))
+                     :else
+                     [id (morph-obj (c1 id) (c2 id))]))
+                 (into {}))]
+      ;; Now `m` contains morphs, we feed them time to get back objects
+      (fn [t] (->> (for [[k v] m] [k (v t)])
+                   (into {}))))))
 
 (do ;; Things to do with the context
   (defn ctx-width [ctx] (-> ctx .-canvas .-width))

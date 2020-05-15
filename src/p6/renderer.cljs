@@ -98,12 +98,38 @@
              (update :rands (fn [rands]
                               (map #(subst % env) rands))))))
 
+(declare lam-conf)
+(def globals
+  ;; Each global name is mapped to a map with two keys.
+  ;; :reduce: given its arguments, returns what it expands to
+  ;; :conf: given its arguments, frame, path and env, returns its render config
+  {'if {:reduce (fn [test then else]
+                  {:type :app, :rator test, :rands [then else]})
+        :conf (fn [[test then else] frame {:keys [path env]}]
+                (let [c (lam-conf
+                         {:type :app :rator test :rands [then else]}
+                         frame
+                         {:path path, :env env})]
+                  (merge
+                   c
+                   {;; Green = Then
+                    (concat path [:green-light])
+                    {:shapes [(u/line [1 0.1] [1 0.4]
+                                      {:stroke u/green :line-width 5})]
+                     :frame (:frame (c (concat path [:rator])))}
+                    ;; Red = Else
+                    (concat path [:red-light])
+                    {:shapes [(u/line [1 0.6] [1 0.9]
+                                      {:stroke u/red :line-width 5})]
+                     :frame (:frame (c (concat path [:rator])))}})))}})
+
 (defn reduce-lam
   "(λ [x] x) ➾ (λ [x] x)
   (((λ [x] (x x)) (λ [x] (x x))) ➾ itself)
   Returns both `exp` and the `path` of the reduction (if happened)
+  Also return `prim?` when the reduction is primitive
   If no reduction is possible, returns `nil`.
-  We try to be liberal: the worst result is `nil` not error."
+  We try to be liberal for testing: the worst result is `nil`, not error."
   ([exp] (reduce-lam exp []))
   ([exp path]
    (case (:type exp)
@@ -112,7 +138,12 @@
             (case (:type rator)
               :var (throw (str "How can a variable ever be an operator?" rator))
               ;; Global operator: some primitive stuff needs to happen
-              :global nil
+              :global
+              (do
+                (if-let [g (-> rator :name globals :reduce)]
+                  {:exp (apply g rands), :path path, :prim? true}
+                  nil))
+
               ;; Abstraction: this is the direct application case
               :abs (let [{:keys [params body]} rator
                          env (->> (for [[param arg]
@@ -120,13 +151,15 @@
                                     [(:sym param) arg])
                                   (into {}))]
                      {:exp (subst body env)
-                      :path path})
+                      :path path
+                      :prim? false})
               ;; Application: might be reducible, let's see...
-              :app (let [{rator+ :exp, path+ :path}
-                         (reduce-lam rator (concat path [:rator]))]
-                     (cond rator+ {:exp (assoc exp :rator rator+)
-                                   :path path+}
-                           :else nil)))))))
+              :app (if-let [red
+                            (reduce-lam rator (concat path [:rator]))]
+                     ;; Note that if the primitive-ness is propagated up
+                     (assoc red
+                            :exp (assoc exp :rator (:exp red)))
+                     nil))))))
 
 (do  ;; Lambda rendering parameters
   (do  ;; The Orange-Memphis colors
@@ -212,184 +245,211 @@
 
              params-conf))
 
-     :app (let [{:keys [rator rands]} exp
-                division 0.5  ;; How much is rator, compared to the whole frame
-                rator-path (concat path [:rator])
-                rator-frame (-> frame
-                                (.scale division 1)
-                                (u/pad-frame lam-pad))
-                rands-path (concat path [:rands])
-                rands-frame (-> frame
-                                (.translate division 0)
-                                (.scale (- 1 division) 1)
-                                (u/pad-frame lam-pad))]
-            (apply merge
-                   {;; The outline
-                    path {:frame frame
-                          :shapes [(u/line [division 0] [division 1]
-                                           {:stroke om-white, :line-width 5})]}}
-                   (;; Config of the rator
-                    lam-conf rator, rator-frame, {:path rator-path, :env env})
-                   (let  ;; Configs of the rands
-                       [scale (/ 1 (count rands))]
-                     (for
-                         [[rand i] (map vector rands (range))]
-                       (let [rand-path (concat rands-path [i])
-                             rand-frame (-> rands-frame
-                                            (.scale 1 scale)
-                                            (.translate 0 i)
-                                            (u/pad-frame lam-pad))]
-                         (lam-conf rand, rand-frame
-                                   {:path rand-path, :env env})))))))))
+     :app
+     (let [{:keys [rator rands]} exp]
+       (case (:type rator)
+         :global  ;; Delegation to the globals' rendering function
+         ((-> rator :name globals :conf)
+          rands
+          frame
+          {:path path :env env})
+
+         (let [division 0.5  ;; How much is rator, compared to the whole frame
+               rator-path (concat path [:rator])
+               rator-frame (-> frame
+                               (.scale division 1)
+                               (u/pad-frame lam-pad))
+               rands-path (concat path [:rands])
+               rands-frame (-> frame
+                               (.translate division 0)
+                               (.scale (- 1 division) 1)
+                               (u/pad-frame lam-pad))]
+           (apply merge
+                  {;; The outline
+                   path {:frame frame
+                         :shapes [(u/line [division 0] [division 1]
+                                          {:stroke om-white, :line-width 5})]}}
+                  (;; Config of the rator
+                   lam-conf rator, rator-frame, {:path rator-path, :env env})
+                  (let  ;; Configs of the rands
+                      [scale (/ 1 (count rands))]
+                    (for
+                        [[rand i] (map vector rands (range))]
+                      (let [rand-path (concat rands-path [i])
+                            rand-frame (-> rands-frame
+                                           (.scale 1 scale)
+                                           (.translate 0 i)
+                                           (u/pad-frame lam-pad))]
+                        (lam-conf rand, rand-frame
+                                  {:path rand-path, :env env})))))))))))
 
 (defn reduce-conft
   "time → configuration of the reduction of `exp`
+  `red` is the reducrion of `exp`
   `tween` is gonna be applied to all phases"
-  ([exp frame] (reduce-conft exp frame {}))
-  ([exp frame {tween :tween :or {tween identity}}]
+  ([exp red frame] (reduce-conft exp red frame {}))
+  ([exp red frame {tween :tween :or {tween identity}}]
    (let [ec (lam-conf exp frame)
-         {exp+ :exp path :path} (reduce-lam exp)
+         {exp+ :exp, path :path, prim? :prim?} red
          ec+ (lam-conf exp+ frame)
-
-         rands (ref-lam exp (concat path [:rands]))
-
-         ;; Map each var path under rator-body to its param path
-         body-refs
-         (letfn [(lam-refs ;; Maps of var-paths to param-paths in `exp`
-                   ([exp] (lam-refs exp {} []))
-                   ([exp env path]
-                    (case (:type exp)
-                      :global {}
-                      :var (if-let [lu (env (:ref exp))] {path lu}
-                                   {})
-                      :abs (let [;; Abstraction updates the environment
-                                 env+ (->> (for [[param i]
-                                                 (u/enumerate (:params exp))]
-                                             [(:sym param)
-                                              (concat path [:params i])])
-                                           (into {}))]
-                             (lam-refs (:body exp), (merge env env+)
-                                       (concat path [:body])))
-                      :app (;; Basically recurse down and merge everything together
-                            apply merge
-                            (lam-refs (:rator exp), env, (concat path [:rator]))
-                            (for [[rand i] (u/enumerate (:rands exp))]
-                              (lam-refs rand, env, (concat path [:rands i])))))))]
-           (let [rpath (concat path [:rator])]
-             (-> exp
-                 (ref-lam rpath)
-                 lam-refs
-                 ;; Note that we have to add back the relative path
-                 (#(->> (for [[k v] %]
-                          [(concat rpath k) (concat rpath v)])
-                        (into {}))))))
-
-         ;; Animation scheme
-         ;; Phase 1: Morph `ec` → `conf1`
-         ;; `conf1`: From `ec`, move rands to rator-params (keep params!)
-         ;; Phase 2: Morph `conf2` → `conf3`, with guidelines
-         ;; `conf3`: From `ec+`, `path` is rendered in rator-body of `ec`
-         ;; `conf2`: From `conf3`, with replaced variables moved to corresponding operands in `conf1`
-         ;; Phase 3 (Final): Morph `conf3` to `ec+`
-
-         ;; `conf1`
-         conf1 ec
-         conf1 (apply merge
-                      conf1
-                      (for [[rand i] (u/enumerate rands)]
-                        (let [rand-path (concat path [:rands i])
-                              ;; The corresponding param
-                              rparam-path (concat path [:rator :params i])]
-                          (;; Config of `rand`, if it were moved to the corresponding param
-                           lam-conf rand
-                           (;; The frame of the corresponding param
-                            :frame (ec rparam-path))
-                           {;; The config is relative to this path
-                            :path rand-path}))))
-
-         ;; `conf3`
-         conf3 ec+
-         conf3 (merge
-                conf3
-                (lam-conf (ref-lam exp+ path)
-                          (:frame (ec (concat path [:rator :body])))
-                          {:path path}))
-
-         ;; `conf2`: This is the hairiest part
-         conf2 conf3
-         conf2 (reduce  ;; Move replaced vars to their params
-                (fn [conf replaced-var]
-                  (let [;; the rator-body part isn't there anymore
-                        replaced-var+
-                        (concat path
-                                (drop (count (concat path [:rator :body]))
-                                      replaced-var))
-                        param-path (body-refs replaced-var)
-                        i (last param-path)
-                        ;; Corresponding operand's path (to refer in `conf1`)
-                        ;; We use `conf1` because the substitution is already done
-                        rand-path (-> param-path
-                                      (#(drop-last 3 %))
-                                      (concat [:rands i]))]
-                    (->> (for [[k v] conf]
-                           (cond (u/prefix? replaced-var+ k)
-                                 (do
-                                   [k (conf1
-                                       (concat rand-path
-                                               (drop (count replaced-var+) k)))])
-
-                                 :else [k v]))
-                         (into {}))))
-                conf2
-                (keys body-refs))
-
          ]
-     (u/series
-      [;; Phase 1
-       (fn [t] (-> t tween
-                   ((;; Just the operand moving
-                     u/morph-conf ec conf1))))
-       1]
-      [;; Phase 2
-       (let [guidelines (->>  ;; Kinda breaking the rule of `conf`, but YOLO!
-                         (for [[k v] body-refs]
-                           [(gensym)
-                            {:shapes [(u/line (u/transform (:frame (ec k)) [0.5 0.5])
-                                              (u/transform (:frame (ec v)) [0.5 0.5])
-                                              {:stroke u/red, :line-width 2})]
-                             :frame (u/dmat)}])
-                         (into {}))]
-         (fn [t]
-           (merge ((u/morph-conf conf2 conf3) (tween t))
-                  guidelines)))
-       1]
-      [;; Phase 3
-       (fn [t]
-         (-> t tween ((u/morph-conf conf3 ec+))))
-       0.5]))))
+     (cond
+       prim?  ;; Primitive expansion
+       (u/morph-conf (merge
+                      (->> (for [[p o] ec+] [p (u/fade-obj o)])
+                           (into {}))
+                      ec)
+                     (fn [p] (or (ec+ p)
+                                 (u/fade-obj (ec p)))))
 
-(defn beta-reductions
-  "Reduce from `exp` to normal form, or hits `limit`"
-  ([exp] (beta-reductions exp 10))
+       :else  ;; Normal application
+       (let [rands (ref-lam exp (concat path [:rands]))
+
+             ;; Map each var path under rator-body to its param path
+             body-refs
+             (letfn [(lam-refs ;; Maps of var-paths to param-paths in `exp`
+                       ([exp] (lam-refs exp {} []))
+                       ([exp env path]
+                        (case (:type exp)
+                          :global {}
+                          :var (if-let [lu (env (:ref exp))] {path lu}
+                                       {})
+                          :abs (let [;; Abstraction updates the environment
+                                     env+ (->> (for [[param i]
+                                                     (u/enumerate (:params exp))]
+                                                 [(:sym param)
+                                                  (concat path [:params i])])
+                                               (into {}))]
+                                 (lam-refs (:body exp), (merge env env+)
+                                           (concat path [:body])))
+                          :app (;; Basically recurse down and merge everything together
+                                apply merge
+                                (lam-refs (:rator exp), env, (concat path [:rator]))
+                                (for [[rand i] (u/enumerate (:rands exp))]
+                                  (lam-refs rand, env, (concat path [:rands i])))))))]
+               (let [rpath (concat path [:rator])]
+                 (-> exp
+                     (ref-lam rpath)
+                     lam-refs
+                     ;; Note that we have to add back the relative path
+                     (#(->> (for [[k v] %]
+                              [(concat rpath k) (concat rpath v)])
+                            (into {}))))))
+
+             ;; Animation scheme
+             ;; Phase 1: Morph `ec` → `conf1`
+             ;; `conf1`: From `ec`, move rands to rator-params (keep params!)
+             ;; Phase 2: Morph `conf2` → `conf3`, with guidelines
+             ;; `conf3`: From `ec+`, `path` is rendered in rator-body of `ec`
+             ;; `conf2`: From `conf3`, with replaced variables moved to corresponding operands in `conf1`
+             ;; Phase 3 (Final): Morph `conf3` to `ec+`
+
+             ;; `conf1`
+             conf1 ec
+             conf1 (apply merge
+                          conf1
+                          (for [[rand i] (u/enumerate rands)]
+                            (let [rand-path (concat path [:rands i])
+                                  ;; The corresponding param
+                                  rparam-path (concat path [:rator :params i])]
+                              (;; Config of `rand`, if it were moved to the corresponding param
+                               lam-conf rand
+                               (;; The frame of the corresponding param
+                                :frame (ec rparam-path))
+                               {;; The config is relative to this path
+                                :path rand-path}))))
+
+             ;; `conf3`
+             conf3 ec+
+             conf3 (merge
+                    conf3
+                    (lam-conf (ref-lam exp+ path)
+                              (:frame (ec (concat path [:rator :body])))
+                              {:path path}))
+
+             ;; `conf2`: This is the hairiest part
+             conf2 conf3
+             conf2 (reduce  ;; Move replaced vars to their params
+                    (fn [conf replaced-var]
+                      (let [;; the rator-body part isn't there anymore
+                            replaced-var+
+                            (concat path
+                                    (drop (count (concat path [:rator :body]))
+                                          replaced-var))
+                            param-path (body-refs replaced-var)
+                            i (last param-path)
+                            ;; Corresponding operand's path (to refer in `conf1`)
+                            ;; We use `conf1` because the substitution is already done
+                            rand-path (-> param-path
+                                          (#(drop-last 3 %))
+                                          (concat [:rands i]))]
+                        (->> (for [[k v] conf]
+                               (cond (u/prefix? replaced-var+ k)
+                                     (do
+                                       [k (conf1
+                                           (concat rand-path
+                                                   (drop (count replaced-var+) k)))])
+
+                                     :else [k v]))
+                             (into {}))))
+                    conf2
+                    (keys body-refs))
+
+             ]
+         (u/series
+          [;; Phase 1
+           (fn [t] (-> t tween
+                       ((;; Just the operand moving
+                         u/morph-conf ec conf1))))
+           1]
+          [;; Phase 2
+           (let [guidelines (->>  ;; Kinda breaking the rule of `conf`, but YOLO!
+                             (for [[k v] body-refs]
+                               [(gensym)
+                                {:shapes [(u/line (u/transform (:frame (ec k)) [0.5 0.5])
+                                                  (u/transform (:frame (ec v)) [0.5 0.5])
+                                                  {:stroke u/red, :line-width 2})]
+                                 :frame (u/dmat)}])
+                             (into {}))]
+             (fn [t]
+               (merge ((u/morph-conf conf2 conf3) (tween t))
+                      guidelines)))
+           1]
+          [;; Phase 3
+           (fn [t]
+             (-> t tween ((u/morph-conf conf3 ec+))))
+           0.5]))))))
+
+(defn lam-reductions
+  "Reduce from `exp` to normal form, or hits `limit`
+  Type: a list of expressions"
+  ([exp] (lam-reductions exp 10))
   ([exp limit]
    (cond (= limit 0) []
-         :else (let [{exp+ :exp} (reduce-lam exp)]
-                 (cond exp+ (concat [exp] (beta-reductions exp+ (dec limit)))
+         :else (let [{exp+ :exp :as red} (reduce-lam exp)]
+                 (cond exp+ (concat [red] (lam-reductions exp+ (dec limit)))
                        :else [])))))
 
-(let [exp (parse '(((λ [_f _a] (_a _f)) (λ [_x] _x) (λ [_x] _x))
+(let [exp (parse '((if (λ [_a _b] _b) (λ [_x] _x) (λ [_x] _x))
                    z))
-      reds (beta-reductions exp)
-      cts (for [e reds]
-            (reduce-conft e a/square-frame {:tween u/quad-out}))]
+      reds (lam-reductions exp)
+      cts (for [[red i] (u/enumerate reds)]
+            (reduce-conft (;; The starting exp
+                           if (= i 0) exp (:exp (nth reds (dec i))))
+                          red
+                          a/the-frame
+                          {:tween u/quad-out}))]
   (a/set-draw!
    (fn [params]
      (u/fill-background a/ctx om-brown)
-     ((apply u/series
-             (for [ct cts]
-               [(fn [t] (u/render-conf a/ctx (ct t))) 1]))
-      (params "t")))))
+     (let [t (params "t")]
+       ((apply u/series
+               (for [ct cts]
+                 [(fn [t] (u/render-conf a/ctx (ct t)))
+                  1]))
+        t)))))
 
+;; I need types real bad!
 ;; I need type hint for path
 ;; Make a "capture" button
 ;; Try resizing the lambda parts
