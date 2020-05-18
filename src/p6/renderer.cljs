@@ -11,16 +11,16 @@
    [cljs.core.async.macros :refer [go-loop go]]))
 
 ;; reduce-rendert can definitely be a conft
-;; λ Syntax: The identity function is (λ [x] x)
+;; lam Syntax: The identity function is (lam [x] x)
 (defn anon?
   "Check if a variable/parameter is meant to be rendered anonymously"
   [exp] (= (-> exp :name str first) \_))
 
 (defn parse
-  "Parse hand-written λ-expression
+  "Parse hand-written lam-expression
    Types of expressions: var, global, param, abs(traction), app(lication)
    `env` maps parameters to gen-symbols
-   (parse '((λ [x] x) a)) ➾
+   (parse '((lam [x] x) a)) ➾
    {:type :app
     :rator {:type :abs, :params ({:name x, :sym G__315})
             :body {:type :var, :name x, :ref G__315}}
@@ -32,8 +32,8 @@
            {:type :var, :name exp, :ref lu}
            {:type :global, :name exp})
 
-         (= (first exp) 'λ)
-         (let [[_λ params body] exp]
+         (= (first exp) 'lam)
+         (let [[_lam params body] exp]
            (assert (and params body)
                    (str "Fowl expression: " exp))
            (let [;; Generate new symbols for new params
@@ -99,6 +99,9 @@
                               (map #(subst % env) rands))))))
 
 (declare lam-conf)
+(defn change-prefix [pre pre+ path]
+  (concat pre+ (drop (count pre) path)))
+
 (def globals
   ;; Each global name is mapped to a map with two keys.
   ;; :reduce: given its arguments, returns what it expands to
@@ -106,26 +109,33 @@
   {'if {:reduce (fn [test then else]
                   {:type :app, :rator test, :rands [then else]})
         :conf (fn [[test then else] frame {:keys [path env]}]
-                (let [c (lam-conf
-                         {:type :app :rator test :rands [then else]}
-                         frame
-                         {:path path, :env env})]
-                  (merge
-                   c
-                   {;; Green = Then
-                    (concat path [:green-light])
-                    {:shapes [(u/line [1 0.1] [1 0.4]
-                                      {:stroke u/green :line-width 5})]
-                     :frame (:frame (c (concat path [:rator])))}
-                    ;; Red = Else
-                    (concat path [:red-light])
-                    {:shapes [(u/line [1 0.6] [1 0.9]
-                                      {:stroke u/red :line-width 5})]
-                     :frame (:frame (c (concat path [:rator])))}})))}})
+                (let [c (-> (lam-conf
+                             {:type :app :rator test :rands [then else]}
+                             frame
+                             {:path path, :env env}))
+                      p #(concat path %)
+                      c (update-in  ;; Add green + red "lights"
+                         c [(p [:rator]) :shapes]
+                         concat
+                         [(u/line [1 0.1] [1 0.4]
+                                  {:stroke u/green :line-width 5})
+                          (u/line [1 0.6] [1 0.9]
+                                  {:stroke u/red :line-width 5})])]
+                  (->> (for [[k v] c]
+                         [(cond
+                            (u/prefix? (p [:rator]) k)
+                            (change-prefix (p [:rator]) (p [:rands 0]) k)
+                            (u/prefix? (p [:rands 0]) k)
+                            (change-prefix (p [:rands 0]) (p [:rands 1]) k)
+                            (u/prefix? (p [:rands 1]) k)
+                            (change-prefix (p [:rands 1]) (p [:rands 2]) k)
+                            :else k)
+                          v])
+                       (into {}))))}})
 
 (defn reduce-lam
-  "(λ [x] x) ➾ (λ [x] x)
-  (((λ [x] (x x)) (λ [x] (x x))) ➾ itself)
+  "(lam [x] x) ➾ (lam [x] x)
+  (((lam [x] (x x)) (lam [x] (x x))) ➾ itself)
   Returns both `exp` and the `path` of the reduction (if happened)
   Also return `prim?` when the reduction is primitive
   If no reduction is possible, returns `nil`.
@@ -139,17 +149,18 @@
               :var (throw (str "How can a variable ever be an operator?" rator))
               ;; Global operator: some primitive stuff needs to happen
               :global
-              (do
-                (if-let [g (-> rator :name globals :reduce)]
-                  {:exp (apply g rands), :path path, :prim? true}
-                  nil))
+              (if-let [g (-> rator :name globals :reduce)]
+                {:exp (apply g rands), :path path, :prim? true}
+                nil)
 
-              ;; Abstraction: this is the direct application case
+              ;; Abstraction: this is vanilla application
               :abs (let [{:keys [params body]} rator
                          env (->> (for [[param arg]
                                         (map vector params rands)]
                                     [(:sym param) arg])
                                   (into {}))]
+                     (assert (= (count params) (count rands))
+                             (str "Arity mismatch: " exp))
                      {:exp (subst body env)
                       :path path
                       :prim? false})
@@ -247,13 +258,16 @@
 
      :app
      (let [{:keys [rator rands]} exp]
-       (case (:type rator)
-         :global  ;; Delegation to the globals' rendering function
+       (cond
+         ;; Delegation to the globals' rendering function (if exists)
+         (and (= (:type rator) :global)
+              (-> rator :name globals :conf))
          ((-> rator :name globals :conf)
           rands
           frame
           {:path path :env env})
 
+         :else
          (let [division 0.5  ;; How much is rator, compared to the whole frame
                rator-path (concat path [:rator])
                rator-frame (-> frame
@@ -304,7 +318,6 @@
 
        :else  ;; Normal application
        (let [rands (ref-lam exp (concat path [:rands]))
-
              ;; Map each var path under rator-body to its param path
              body-refs
              (letfn [(lam-refs ;; Maps of var-paths to param-paths in `exp`
@@ -335,6 +348,12 @@
                      (#(->> (for [[k v] %]
                               [(concat rpath k) (concat rpath v)])
                             (into {}))))))
+
+             replaced-refs (for [[k v] body-refs
+                                 :when (u/prefix? (concat path
+                                                          [:rator :params])
+                                                  v)]
+                             [k v])
 
              ;; Animation scheme
              ;; Phase 1: Morph `ec` → `conf1`
@@ -393,8 +412,7 @@
                                      :else [k v]))
                              (into {}))))
                     conf2
-                    (keys body-refs))
-
+                    (for [[k v] replaced-refs] k))
              ]
          (u/series
           [;; Phase 1
@@ -404,16 +422,16 @@
            1]
           [;; Phase 2
            (let [guidelines (->>  ;; Kinda breaking the rule of `conf`, but YOLO!
-                             (for [[k v] body-refs]
+                             (for [[k v] replaced-refs]
                                [(gensym)
                                 {:shapes [(u/line (u/transform (:frame (ec k)) [0.5 0.5])
                                                   (u/transform (:frame (ec v)) [0.5 0.5])
                                                   {:stroke u/red, :line-width 2})]
                                  :frame (u/dmat)}])
-                             (into {}))]
+                             (into {}))
+                 c (u/morph-conf conf2 conf3)]
              (fn [t]
-               (merge ((u/morph-conf conf2 conf3) (tween t))
-                      guidelines)))
+               (merge (c (tween t)) guidelines)))
            1]
           [;; Phase 3
            (fn [t]
@@ -430,27 +448,51 @@
                  (cond exp+ (concat [red] (lam-reductions exp+ (dec limit)))
                        :else [])))))
 
-(let [exp (parse '((if (λ [_a _b] _b) (λ [_x] _x) (λ [_x] _x))
-                   z))
-      reds (lam-reductions exp)
-      cts (for [[red i] (u/enumerate reds)]
-            (reduce-conft (;; The starting exp
-                           if (= i 0) exp (:exp (nth reds (dec i))))
-                          red
-                          a/the-frame
-                          {:tween u/quad-out}))]
-  (a/set-draw!
-   (fn [params]
-     (u/fill-background a/ctx om-brown)
-     (let [t (params "t")]
-       ((apply u/series
-               (for [ct cts]
-                 [(fn [t] (u/render-conf a/ctx (ct t)))
-                  1]))
-        t)))))
+(defn reduce! [exp]
+  (let [exp (parse exp)
+        reds (lam-reductions exp)
+        cts (for [[red i] (u/enumerate reds)]
+              (reduce-conft (;; The starting exp
+                             if (= i 0) exp (:exp (nth reds (dec i))))
+                            red
+                            (a/the-frame)
+                            {:tween u/quad-out}))]
+    (swap! (-> a/t-control :state)
+           assoc :cycle (* 5 (count reds)))
 
-;; I need types real bad!
-;; I need type hint for path
+    (a/set-draw!
+     (fn [params]
+       (u/fill-background a/ctx om-brown)
+       (let [t (params "t")]
+         ((apply u/series
+                 (for [ct cts]
+                   [(fn [t] (u/render-conf a/ctx (ct t)))
+                    1]))
+          t))))))
+
+(defn draw-lam! [exp]
+  (let [exp (parse exp)
+        c (lam-conf exp (a/the-frame))]
+    (a/set-draw!
+     (fn [params]
+       (u/fill-background a/ctx om-brown)
+       (u/render-conf a/ctx c)))))
+
+;; True:  (lam [_x _y] _x)
+;; False: (lam [_x _y] _y)
+;; And: (lam [_x _y] (if _x _y (lam [_x _y] _y)))
+;; Or: (lam [_x _y] (if _x (lam [_x _y] _x) _y))
+;; Loop ((lam [_x] (_x _x)) (lam [_x] (_x _x)))
+(reduce!  '((lam [_x _y] (if _x (lam [_x _y] _x) _y))
+            (lam [_x _y] _x)
+            ((lam [_x] (_x _x)) (lam [_x] (_x _x)))))
+
+;; We can use webstream to ease the ffmpeg work
+;; The desugar problem: do NOT morph configs!
+;; Macros can have appearances by themselves; or I do not let them appear alone at all
+;; I think we have to go back to the "rendert" era (return shapes)
+;; Fix the Python script to change paths
+;; I need types real bad: vector type hint for path
 ;; Make a "capture" button
 ;; Try resizing the lambda parts
 ;; Implement frame movement techniques (as in introduction & delay)

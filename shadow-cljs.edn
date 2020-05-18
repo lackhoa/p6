@@ -8,6 +8,7 @@
                  :main p6.main/main}
 
           :renderer {:target :browser
+                     :js-options {:js-provider :require}
                      :output-dir "resources/public/js"
                      :asset-path "js"  ;; the server's root is "resources/public"
                      :modules {:renderer {:entries [p6.renderer]}}}}}

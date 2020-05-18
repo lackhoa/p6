@@ -1,4 +1,3 @@
-;; How to run: (npm run dev), (electron .)
 (ns p6.main
   ;; This is node require
   (:require

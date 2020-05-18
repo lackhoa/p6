@@ -2,6 +2,12 @@
   (:require
    [reagent.core :as r]
    [reagent.dom :as rdom]
+   ["fs" :as fs]
+   ["os" :as os]
+   ["electron" :as electron]
+   ["electron-prompt" :as electron-prompt]
+   ["child_process" :as child-process]
+
    [cljs.reader :refer [read-string]]
    [cljs.core.async :refer [<! chan sliding-buffer put! close! timeout]]
    [clojure.string :as str]
@@ -11,11 +17,6 @@
   (:require-macros
    [cljs.core.async.macros :refer [go-loop go]]))
 
-(defonce fs (js/require "fs"))
-(defonce electron (js/require "electron"))
-(defonce child-process (js/require "child_process"))
-(defonce ipcRenderer (.-ipcRenderer electron))
-(defonce electron-prompt (js/require "electron-prompt"))
 (defn prompt [opts] (electron-prompt (clj->js opts)))
 
 (defonce _initialize-app  ;; Define the application
@@ -125,8 +126,10 @@
              (when @show?
                [:ul {:style {:padding "10px"}}
                 (for [ctr @control-list]  ;; Dynamic controls
-                  ^{:key (ctr :param)}
                   [:<>
+                   {:key (or (:param ctr)
+                             (;; Some controls aren't tied to a parameter
+                              :key ctr))}
                    (case (ctr :type)
                      :custom [(ctr :component)]
                      :slider [slider (ctr :param) (ctr :state)]
@@ -147,10 +150,13 @@
     (do   ;; Initialize the canvas
       (def canvas (.getElementById js/document "main-canvas"))
       (def ctx    (.getContext canvas "2d"))
-      (def w (.-innerWidth  js/window))
-      (def h (.-innerHeight js/window))
-      (set! (.-width  canvas) w)
-      (set! (.-height canvas) h)
+      (defonce w (atom (.-innerWidth  js/window)))
+      (defonce h (atom (.-innerHeight js/window)))
+      (set! (.-width  canvas) @w)
+      (set! (.-height canvas) @h)
+
+      (defn the-frame [] (.scale (u/dmat) @w @h))
+      (defn square-frame [] (u/force-square (the-frame)))
       (do  ;; Color & Style Setup
         ;; We usually don't need any implicit state
         ;; But it's nice to setup color for experimentation
@@ -159,6 +165,7 @@
               (-> (assoc u/green :a 0.25) u/css))
         (set! (.-font ctx) "normal 20px Arial")))
 
+    (def rel-path (str os/homedir "/recording/"))
     (do  ;; Recording business
       (def recording? (r/atom false))  ;; Flag to tell if a recording is going on, so that the animation cycle won't have any effects
 
@@ -166,8 +173,8 @@
         (reset! recording? true)
         (println "Recording started")
 
-        (let [path "/home/khoa/note/data/recorded/canvas.txt"
-              stream (.createWriteStream fs path)
+        (let [path (str rel-path "canvas.txt")
+              stream (fs/createWriteStream path)
               vid-time (let [t-state @(t-control :state)]
                          (t-state :cycle))
               t-step (-> (/ 1 fps) ((u/to-01 0 vid-time)))]
@@ -183,20 +190,20 @@
           (.end stream))
 
         (println "Converting to video")
-        (.exec child-process
-               "python3 /home/khoa/note/data/recorded/main.py"
-               (fn [error stdout stderr]
-                 (println "Conversion to video done (or errored out)!")
-                 (println {:error error})))
+        (child-process/exec
+         (str "python3 " rel-path "main.py")
+         (fn [error stdout stderr]
+           (println "Conversion to video done (or errored out)!")
+           (println {:error error})))
 
-        (println "Recording is done!")
         ;; Convert data to video, too!
         (reset! recording? false))
 
       ;; Add recording button to the control list
       (swap! control-list
              (fn [l]
-               (cons {:type      :custom
+               (cons {:type :custom
+                      :key  "record"
                       :component (fn []
                                    (let [rec? @recording?]
                                      [:button#rec-btn
@@ -207,10 +214,35 @@
                                       (cond rec?  "Recording..."
                                             :else "Rec")]))}
                      l))))
+
+    (do  ;; Capture
+      (defn capture []
+        (println "Capturing canvas")
+        (let [path (str rel-path "canvas.txt")
+              stream (fs/createWriteStream path)
+              data ^js/String (-> canvas (.toDataURL) (.split ",") (last))]
+          (.write stream data) (.end stream))
+
+        (println "Converting to image")
+        (child-process/exec
+         (str "python3 " rel-path "main.py")
+         (fn [error stdout stderr]
+           (println "Conversion to image done (or errored out)")
+           (println {:error error}))))
+
+      (swap! control-list
+             (fn [l]
+               (cons {:type :custom
+                      :key  "capture"
+                      :component (fn []
+                                   [:button#rec-btn
+                                    {:on-click (fn [e] (capture))
+                                     :style {:font-size "20px"}}
+                                    "Capture"])}
+                     l))))
+
     true))
 
-(def the-frame (-> (u/dmat) (.scale w h)))
-(def square-frame (u/force-square the-frame))
 (do  ;; Zooming & Panning
   (reset! params
           ;; view-frame is initially "the-frame"
@@ -236,18 +268,21 @@
   (defn teleport []
     (let [[mx my] @mouse-pos
           ;; [x y] is the vector from screen center → mouse
-          [x y]   [(- (/ w 2) mx) (- (/ h 2) my)]]
+          [x y]   [(- (/ @w 2) mx) (- (/ @h 2) my)]]
       (update-param "view-frame"
                     (fn [f]
                       (new js/DOMMatrix [(.-a f) (.-b f) (.-c f) (.-d f)
                                          (+ (.-e f) x) (+ (.-f f) y)])))))
 
-  (reset! keymap (merge @keymap {"i" #(zoom (* w 0.25))
-                                 "o" #(zoom (* w -0.25))
+  (reset! keymap (merge @keymap {"i" #(zoom (* @w 0.25))
+                                 "o" #(zoom (* @w -0.25))
                                  "m" teleport
                                  "0" #(set-param "view-frame" the-frame)})))
 
-(defn render [] (reset! params @params))
+(defn render []
+  (cond (false? (@params "clr")) ()
+        :else (-> ctx (.clearRect 0 0 w h)))
+  (@draw @params))
 
 (defn set-draw! [fun]
   (reset! draw fun)
@@ -258,10 +293,16 @@
   ;; "params" (a map of parameters)
   ;; "draw" (a no-argument function)
   (add-watch params :draw  ;; Redraw each time "params" change
-             (fn [_ _ _ _]
-               (cond (false? (@params "clr")) ()
-                     :else (-> ctx (.clearRect 0 0 w h)))
-               (@draw @params)))
+             (fn [_ _ _ _] (render)))
+
+  (.addEventListener  ;; Rerender each time the window size changes
+   js/window "resize"
+   (fn [e]
+     (reset! w (.-innerWidth  js/window))
+     (reset! h (.-innerHeight js/window))
+     (set! (.-width  canvas) @w)
+     (set! (.-height canvas) @h)
+     (render)))
 
   ;; Update cycle to adjust parameters (simulate animation)
   (let [delay (/ 1000 fps)]
