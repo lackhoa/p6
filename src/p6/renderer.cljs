@@ -455,7 +455,7 @@
               (reduce-conft (;; The starting exp
                              if (= i 0) exp (:exp (nth reds (dec i))))
                             red
-                            (a/the-frame)
+                            @a/the-frame
                             {:tween u/quad-out}))]
     (swap! (-> a/t-control :state)
            assoc :cycle (* 5 (count reds)))
@@ -472,7 +472,7 @@
 
 (defn draw-lam! [exp]
   (let [exp (parse exp)
-        c (lam-conf exp (a/the-frame))]
+        c (lam-conf exp @a/the-frame)]
     (a/set-draw!
      (fn [params]
        (u/fill-background a/ctx om-brown)

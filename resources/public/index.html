@@ -6,9 +6,10 @@
   </head>
   <body>
     <div id="app">This is the `app` div</div>
+    <script>if (typeof module === 'object') {window.module = module; module = undefined;}</script>
     <!-- External JS dependencies go here -->
-    <!-- These files are in the same folder -->
-
+    <script src='../../node_modules/ccapture.js/build/CCapture.all.min.js'></script>
+    <script>if (window.module) module = window.module;</script>
     <!-- The "client" renderer script -->
     <script src="js/renderer.js"></script>
   </body>
