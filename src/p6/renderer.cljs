@@ -103,11 +103,17 @@
   (concat pre+ (drop (count pre) path)))
 
 (def globals
-  ;; Each global name is mapped to a map with two keys.
-  ;; :reduce: given its arguments, returns what it expands to
-  ;; :conf: given its arguments, frame, path and env, returns its render config
-  {'if {:reduce (fn [test then else]
-                  {:type :app, :rator test, :rands [then else]})
+  ;; Each global name is mapped to a map with these keys.
+  ;; macro (if it's a macro): given its arguments, returns what it expands to
+  ;; def (if it's a definition): returns what the definition of the name
+  ;; conf (opt): given its arguments, frame, path and env, returns its render config
+  {'True {:def (parse '(lam [_x _y] _x))}
+   'False {:def (parse '(lam [_x _y] _y))}
+   'and {:def (parse '(lam [_x _y] (if _x _y False)))}
+   'or {:def (parse '(lam [_x _y] (if _x True _y)))}
+   'loop {:def (parse '((lam [_x] (_x _x)) (lam [_x] (_x _x))))}
+   'if {:macro (fn [test then else]
+                 {:type :app, :rator test, :rands [then else]})
         :conf (fn [[test then else] frame {:keys [path env]}]
                 (let [c (-> (lam-conf
                              {:type :app :rator test :rands [then else]}
@@ -143,15 +149,22 @@
   ([exp] (reduce-lam exp []))
   ([exp path]
    (case (:type exp)
-     (:global :var :abs) nil
+     (:var :abs) nil
+     :global (if-let [d (-> exp :name globals :def)]  ;; A global definition
+               {:exp d, :path path, :prim? true}
+               nil)
      :app (let [{:keys [rator rands]} exp]
             (case (:type rator)
               :var (throw (str "How can a variable ever be an operator?" rator))
               ;; Global operator: some primitive stuff needs to happen
               :global
-              (if-let [g (-> rator :name globals :reduce)]
-                {:exp (apply g rands), :path path, :prim? true}
-                nil)
+              (let [g (-> rator :name globals)]
+                (if-let [m (:macro g)]  ;; Handle macro
+                  {:exp (apply m rands), :path path, :prim? true}
+                  (if-let [d (:def g)]  ;; Just a normal global definition
+                    {:exp (assoc exp :rator d)
+                     :path (concat path [:rator]), :prim? true}
+                    nil)))
 
               ;; Abstraction: this is vanilla application
               :abs (let [{:keys [params body]} rator
@@ -199,8 +212,9 @@
   ([exp frame] (lam-conf exp frame {}))
   ([exp frame {:keys [path env] :or {path [], env {}}}]
    (case (:type exp)
-     :global {path {:frame frame
-                    :shapes (lam-global-shapes (:name exp))}}
+     :global  ;; Global definition (not macro)
+     {path {:frame frame
+            :shapes (lam-global-shapes (:name exp))}}
      :var {path (if (anon? exp) {:frame (u/force-square frame)
                                  :shapes lam-anon-shapes}
                     {:frame frame
@@ -277,7 +291,8 @@
                rands-frame (-> frame
                                (.translate division 0)
                                (.scale (- 1 division) 1)
-                               (u/pad-frame lam-pad))]
+                               ;; (u/pad-frame lam-pad)  Not sure if this is needed, since individual operands are already padded
+                               )]
            (apply merge
                   {;; The outline
                    path {:frame frame
@@ -297,24 +312,25 @@
                         (lam-conf rand, rand-frame
                                   {:path rand-path, :env env})))))))))))
 
-(defn reduce-conft
-  "time → configuration of the reduction of `exp`
+(defn reduce-objst
+  "time → objects showing the reduction of `exp`
   `red` is the reducrion of `exp`
   `tween` is gonna be applied to all phases"
-  ([exp red frame] (reduce-conft exp red frame {}))
+  ([exp red frame] (reduce-objst exp red frame {}))
   ([exp red frame {tween :tween :or {tween identity}}]
    (let [ec (lam-conf exp frame)
          {exp+ :exp, path :path, prim? :prim?} red
-         ec+ (lam-conf exp+ frame)
-         ]
+         ec+ (lam-conf exp+ frame)]
      (cond
        prim?  ;; Primitive expansion
-       (u/morph-conf (merge
-                      (->> (for [[p o] ec+] [p (u/fade-obj o)])
-                           (into {}))
-                      ec)
-                     (fn [p] (or (ec+ p)
-                                 (u/fade-obj (ec p)))))
+       (let [l (concat  ;; Morph all the objects first
+                (for [obj (vals ec)]  ;; The sugar fades out
+                  (u/morph-obj obj (u/fade-obj obj)))
+                (for [obj (vals ec+)]  ;; The real function fades in
+                  (u/morph-obj (u/fade-obj obj) obj)))]
+         (fn [t]
+           (let [t (tween t)]  ;; Retrieve the objects
+             (for [ot l] (ot t)))))
 
        :else  ;; Normal application
        (let [rands (ref-lam exp (concat path [:rands]))
@@ -416,26 +432,23 @@
              ]
          (u/series
           [;; Phase 1
-           (fn [t] (-> t tween
-                       ((;; Just the operand moving
-                         u/morph-conf ec conf1))))
+           (let [m (;; Just the operand moving
+                    u/morph-conf ec conf1)]
+             (fn [t] (-> t tween m vals)))
            1]
           [;; Phase 2
-           (let [guidelines (->>  ;; Kinda breaking the rule of `conf`, but YOLO!
-                             (for [[k v] replaced-refs]
-                               [(gensym)
-                                {:shapes [(u/line (u/transform (:frame (ec k)) [0.5 0.5])
-                                                  (u/transform (:frame (ec v)) [0.5 0.5])
-                                                  {:stroke u/red, :line-width 2})]
-                                 :frame (u/dmat)}])
-                             (into {}))
+           (let [guidelines (for [[k v] replaced-refs]
+                              {:shapes [(u/line (u/transform (:frame (ec k)) [0.5 0.5])
+                                                (u/transform (:frame (ec v)) [0.5 0.5])
+                                                {:stroke u/red, :line-width 2})]
+                               :frame (u/dmat)})
                  c (u/morph-conf conf2 conf3)]
              (fn [t]
-               (merge (c (tween t)) guidelines)))
+               (-> t tween c vals (concat guidelines))))
            1]
           [;; Phase 3
            (fn [t]
-             (-> t tween ((u/morph-conf conf3 ec+))))
+             (-> t tween ((u/morph-conf conf3 ec+)) vals))
            0.5]))))))
 
 (defn lam-reductions
@@ -451,23 +464,24 @@
 (defn reduce! [exp]
   (let [exp (parse exp)
         reds (lam-reductions exp)
-        cts (for [[red i] (u/enumerate reds)]
-              (reduce-conft (;; The starting exp
-                             if (= i 0) exp (:exp (nth reds (dec i))))
-                            red
-                            @a/the-frame
-                            {:tween u/quad-out}))]
+        objs (for [[red i] (u/enumerate reds)]
+               (reduce-objst (;; The starting exp
+                              if (= i 0) exp (:exp (nth reds (dec i))))
+                             red
+                             @a/the-frame
+                             {:tween u/quad-out}))]
     (swap! (-> a/t-control :state)
-           assoc :cycle (* 5 (count reds)))
+           assoc :cycle (* 2 (count reds)))
 
     (a/set-draw!
      (fn [params]
        (u/fill-background a/ctx om-brown)
        (let [t (params "t")]
          ((apply u/series
-                 (for [ct cts]
-                   [(fn [t] (u/render-conf a/ctx (ct t)))
-                    1]))
+                 (for [[ct i] (u/enumerate objs)]
+                   [(fn [t] (u/render-objs a/ctx (ct t)))
+                    (if (:prim? (nth reds i)) 0.2
+                        1)]))
           t))))))
 
 (defn draw-lam! [exp]
@@ -478,25 +492,11 @@
        (u/fill-background a/ctx om-brown)
        (u/render-conf a/ctx c)))))
 
-;; True:  (lam [_x _y] _x)
-;; False: (lam [_x _y] _y)
-;; And: (lam [_x _y] (if _x _y (lam [_x _y] _y)))
-;; Or: (lam [_x _y] (if _x (lam [_x _y] _x) _y))
-;; Loop ((lam [_x] (_x _x)) (lam [_x] (_x _x)))
-(reduce!  '((lam [_x _y] (if _x (lam [_x _y] _x) _y))
-            (lam [_x _y] _x)
-            ((lam [_x] (_x _x)) (lam [_x] (_x _x)))))
+(reduce! '(or True False))
 
-;; We can use webstream to ease the ffmpeg work
-;; The desugar problem: do NOT morph configs!
-;; Macros can have appearances by themselves; or I do not let them appear alone at all
-;; I think we have to go back to the "rendert" era (return shapes)
-;; Fix the Python script to change paths
+;; Get custom appearance for global defs: like eg a tickmark for "true"
 ;; I need types real bad: vector type hint for path
 ;; Make a "capture" button
 ;; Try resizing the lambda parts
-;; Implement frame movement techniques (as in introduction & delay)
-;; implement intro/outro frames (in the morph function)
-;; Draw directly from vertices, to not lose structure of polygons
-;; the drawing gets more complex, but it's a price you pay for richer structures
+;; Draw directly from vertices, to not lose structure of polygons. The drawing gets more complex, but it's a price you pay for richer structures
 ;; Implement 2D mouse control

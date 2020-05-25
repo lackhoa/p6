@@ -370,7 +370,7 @@
     "`ss1` fades out, and `ss2` fades in"
     [ss1 ss2]
     (cond
-      ;; This check can be lethal for alike-objects!
+      ;; This check can be lethal for alike-shapes!
       (= ss1 ss2) (fn [t] ss1)
       :else (let [ms (concat (for [s ss1] (morph s (fade s)))
                              (for [s ss2] (morph (fade s) s)))]
@@ -536,10 +536,14 @@
                   (line [xmin y] [xmax y] {:stroke style})
                   frame))))))
 
+  (defn render-objs
+    [ctx objs]
+    (doseq [{:keys [shapes frame]} objs]
+      (doseq [shape shapes]
+        (paint ctx shape frame))))
+
   (defn render-conf
     "Just draw all the objects in `conf`
-   Note: objects and their identities don't matter in rendering."
+    Note: objects and their identities don't matter in rendering."
     [ctx conf]
-    (doseq [{:keys [shapes frame]} (vals conf)]
-      (doseq [shape shapes]
-        (paint ctx shape frame)))))
+    (render-objs ctx (vals conf))))

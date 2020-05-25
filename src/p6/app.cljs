@@ -20,7 +20,7 @@
 (defn prompt [opts] (electron-prompt (clj->js opts)))
 
 (defonce params (r/atom {"t" 0}))
-(def fps 25)
+(def fps 15)
 (defn set-param [param val]
   (swap! params assoc param val))
 (defn update-param [param updater]
@@ -69,9 +69,9 @@
     (println "Recording started")
 
     (let [capturer (js/CCapture.
-                    (clj->js {:format "webm" :startTime 5,
-                              :quality 0.1,
-                              :framerate fps, :verbose true}))
+                    (clj->js {:format "webm",
+                              :quality 0.0,
+                              :framerate fps}))
           vid-time (let [t-state @(t-control :state)]
                      (t-state :cycle))
           t-step (-> (/ 1 fps) ((u/to-01 0 vid-time)))]
