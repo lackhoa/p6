@@ -16,7 +16,7 @@
     "author": "Khoa Vo <vodangkhoa873@gmail.com>",
     "license": "ISC",
     "devDependencies": {
-        "electron": "^3.1.13",
+        "electron": "^7.2.4",
         "shadow-cljs": "^2.8.94"
     },
     "dependencies": {
